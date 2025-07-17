@@ -3,6 +3,7 @@ import { fetchRepository, fetchContributors, fetchCommitActivity, transformCommi
 import { CommitChart } from '@/components/CommitChart';
 import { Contributors } from '@/components/Contributors';
 import { RepoForm } from '@/components/RepoForm';
+import { MostChangedFiles } from '@/components/MostChangedFiles';
 
 interface PageProps {
   params: Promise<{
@@ -39,7 +40,7 @@ export default async function AnalyzePage({ params }: PageProps) {
 
   return (
     <div className="min-h-screen bg-gray-50 dark:bg-gray-900 py-4 sm:py-8">
-      <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         {/* Repository Form Section */}
         <section className="bg-white dark:bg-gray-800 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700 p-4 sm:p-6 mb-6" aria-label="Repository search">
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-4">
@@ -155,6 +156,13 @@ export default async function AnalyzePage({ params }: PageProps) {
         {/* Commit Activity Chart */}
         <section className="mb-6" aria-label="Commit activity visualization">
           <CommitChart owner={owner} repo={repo} data={commitActivity} />
+        </section>
+
+        {/* Most Changed Files Analysis */}
+        <section className="mb-6" aria-label="File change analysis">
+          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700 p-4 sm:p-6">
+            <MostChangedFiles owner={owner} repo={repo} />
+          </div>
         </section>
       </div>
     </div>
