@@ -1,17 +1,23 @@
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import AnalyzePage from './page';
 import * as githubApi from '@/lib/github-api';
 
 // Mock all the components
 jest.mock('@/components/CommitChart', () => ({
-  CommitChart: ({ owner, repo }: any) => (
-    <div data-testid="commit-chart">CommitChart for {owner}/{repo}</div>
+  CommitChart: ({ owner, repo, data }: any) => (
+    <div data-testid="commit-chart">
+      <span>CommitChart for {owner}/{repo}</span>
+      <span>Data points: {data.length}</span>
+    </div>
   ),
 }));
 
 jest.mock('@/components/Contributors', () => ({
-  Contributors: ({ owner, repo }: any) => (
-    <div data-testid="contributors">Contributors for {owner}/{repo}</div>
+  Contributors: ({ owner, repo, data }: any) => (
+    <div data-testid="contributors">
+      <span>Contributors for {owner}/{repo}</span>
+      <span>Count: {data.length}</span>
+    </div>
   ),
 }));
 
@@ -24,6 +30,15 @@ jest.mock('@/components/RepoForm', () => ({
 jest.mock('@/components/MostChangedFiles', () => ({
   MostChangedFiles: ({ owner, repo }: any) => (
     <div data-testid="most-changed-files">MostChangedFiles for {owner}/{repo}</div>
+  ),
+}));
+
+jest.mock('@/components/BranchPRStats', () => ({
+  BranchPRStats: ({ owner, repo, initialTimePeriod }: any) => (
+    <div data-testid="branch-pr-stats">
+      <span>BranchPRStats for {owner}/{repo}</span>
+      <span>Period: {initialTimePeriod || '30d'}</span>
+    </div>
   ),
 }));
 
@@ -93,7 +108,7 @@ describe('AnalyzePage Integration', () => {
     mockTransformCommitActivity.mockReturnValue(mockTransformedActivity);
   });
 
-  it('renders all components including MostChangedFiles', async () => {
+  it('renders all components including BranchPRStats', async () => {
     const params = Promise.resolve({ owner: 'test-owner', repo: 'test-repo' });
     
     render(await AnalyzePage({ params }));
@@ -108,9 +123,11 @@ describe('AnalyzePage Integration', () => {
     expect(screen.getByTestId('contributors')).toBeInTheDocument();
     expect(screen.getByTestId('commit-chart')).toBeInTheDocument();
     expect(screen.getByTestId('most-changed-files')).toBeInTheDocument();
+    expect(screen.getByTestId('branch-pr-stats')).toBeInTheDocument();
     
-    // Verify MostChangedFiles receives correct props
+    // Verify components receive correct props
     expect(screen.getByText('MostChangedFiles for test-owner/test-repo')).toBeInTheDocument();
+    expect(screen.getByText('BranchPRStats for test-owner/test-repo')).toBeInTheDocument();
   });
 
   it('displays repository statistics correctly', async () => {
@@ -144,6 +161,7 @@ describe('AnalyzePage Integration', () => {
     expect(screen.getByLabelText('Repository contributors')).toBeInTheDocument();
     expect(screen.getByLabelText('Commit activity visualization')).toBeInTheDocument();
     expect(screen.getByLabelText('File change analysis')).toBeInTheDocument();
+    expect(screen.getByLabelText('Branch and pull request analytics')).toBeInTheDocument();
   });
 
   it('handles private repositories correctly', async () => {
@@ -206,5 +224,41 @@ describe('AnalyzePage Integration', () => {
       'p-4',
       'sm:p-6'
     );
+
+    // Check that BranchPRStats section has consistent styling
+    const branchPRSection = screen.getByLabelText('Branch and pull request analytics');
+    expect(branchPRSection).toHaveClass('mb-6');
+  });
+
+  it('integrates BranchPRStats component correctly', async () => {
+    const params = Promise.resolve({ owner: 'test-owner', repo: 'test-repo' });
+    
+    render(await AnalyzePage({ params }));
+
+    // Verify BranchPRStats is rendered with correct props
+    expect(screen.getByTestId('branch-pr-stats')).toBeInTheDocument();
+    expect(screen.getByText('BranchPRStats for test-owner/test-repo')).toBeInTheDocument();
+    expect(screen.getByText('Period: 30d')).toBeInTheDocument();
+  });
+
+  it('renders sections in correct order', async () => {
+    const params = Promise.resolve({ owner: 'test-owner', repo: 'test-repo' });
+    
+    const { container } = render(await AnalyzePage({ params }));
+
+    const sections = container.querySelectorAll('section');
+    
+    // Should have sections in this order:
+    // 1. Repository Form
+    // 2. Repository Stats
+    // 3. Contributors
+    // 4. Commit Activity Chart
+    // 5. Most Changed Files
+    // 6. Branch & PR Stats
+    expect(sections).toHaveLength(6);
+    
+    // Verify the last section is Branch & PR Stats
+    const lastSection = sections[sections.length - 1];
+    expect(lastSection).toHaveAttribute('aria-label', 'Branch and pull request analytics');
   });
 });

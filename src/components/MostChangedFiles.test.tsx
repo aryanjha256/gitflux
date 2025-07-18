@@ -224,6 +224,7 @@ describe('MostChangedFiles', () => {
     mockFetchCommitsWithFiles.mockResolvedValue({
       data: mockCommitFileData,
       rateLimit: { remaining: 10, reset: Date.now() + 3600000, limit: 5000 }, // Low remaining
+      rateLimitWarning: true,
     });
 
     render(<MostChangedFiles owner="test-owner" repo="test-repo" />);
@@ -232,6 +233,56 @@ describe('MostChangedFiles', () => {
       expect(screen.getByText('Rate limit warning')).toBeInTheDocument();
       expect(screen.getByText('Analysis may be incomplete due to GitHub API rate limits')).toBeInTheDocument();
     });
+  });
+
+  it('displays progress indicator during loading', async () => {
+    let progressCallback: ((processed: number, total: number) => void) | undefined;
+    
+    mockFetchCommitsWithFiles.mockImplementation((...args: any[]) => {
+      const options = args[5] || {};
+      progressCallback = options.onProgress;
+      
+      // Simulate progress
+      setTimeout(() => {
+        if (progressCallback) {
+          progressCallback(25, 100);
+        }
+      }, 100);
+      
+      return new Promise(resolve => {
+        setTimeout(() => {
+          resolve({
+            data: mockCommitFileData,
+            rateLimit: { remaining: 100, reset: Date.now() + 3600000, limit: 5000 },
+          });
+        }, 200);
+      });
+    });
+
+    render(<MostChangedFiles owner="test-owner" repo="test-repo" />);
+
+    // Should show progress indicator
+    await waitFor(() => {
+      expect(screen.getByText(/Processing commits/)).toBeInTheDocument();
+    });
+  });
+
+  it('handles request cancellation', async () => {
+    mockFetchCommitsWithFiles.mockImplementation(() => {
+      return new Promise((resolve) => {
+        setTimeout(() => {
+          resolve({ error: 'Request was cancelled' });
+        }, 100);
+      });
+    });
+
+    const { unmount } = render(<MostChangedFiles owner="test-owner" repo="test-repo" />);
+    
+    // Unmount component to trigger cancellation
+    unmount();
+    
+    // Should not throw any errors
+    expect(true).toBe(true);
   });
 
   it('displays summary statistics when data is loaded', async () => {

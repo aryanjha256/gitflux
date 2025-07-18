@@ -90,6 +90,136 @@ export interface FileChangeApiResponse extends GitHubApiResponse<FileChangeAnaly
     rateLimitWarning?: boolean;
 }
 
+// Branch and PR data types
+export interface BranchData {
+    name: string;
+    lastCommitDate: string;
+    commitCount: number;
+    status: 'active' | 'merged' | 'stale';
+    isDefault: boolean;
+    ahead: number;
+    behind: number;
+    author: string;
+    lastCommitSha: string;
+    lastCommitMessage: string;
+}
+
+export interface PRData {
+    number: number;
+    title: string;
+    state: 'open' | 'closed' | 'merged';
+    createdAt: string;
+    mergedAt?: string;
+    closedAt?: string;
+    author: string;
+    reviewCount: number;
+    timeToMerge?: number;
+    linesChanged: number;
+    additions: number;
+    deletions: number;
+    reviewers: string[];
+    labels: string[];
+    isDraft: boolean;
+}
+
+export interface ReviewData {
+    prNumber: number;
+    reviewers: string[];
+    reviewCount: number;
+    approvalCount: number;
+    changeRequestCount: number;
+    commentCount: number;
+    timeToFirstReview?: number;
+    timeToApproval?: number;
+    reviews: {
+        reviewer: string;
+        state: 'APPROVED' | 'CHANGES_REQUESTED' | 'COMMENTED';
+        submittedAt: string;
+    }[];
+}
+
+export interface BranchAnalytics {
+    totalBranches: number;
+    activeBranches: number;
+    mergedBranches: number;
+    staleBranches: number;
+    branches: BranchData[];
+    branchActivity: BranchActivityData[];
+}
+
+export interface BranchActivityData {
+    date: string;
+    branchesCreated: number;
+    branchesMerged: number;
+    branchesDeleted: number;
+}
+
+export interface PRAnalyticsData {
+    totalPRs: number;
+    openPRs: number;
+    closedPRs: number;
+    mergedPRs: number;
+    averageTimeToMerge: number;
+    averageReviewTime: number;
+    averagePRSize: number;
+    pullRequests: PRData[];
+    timeline: PRTimelineData[];
+    topContributors: ContributorStats[];
+}
+
+export interface PRTimelineData {
+    date: string;
+    opened: number;
+    merged: number;
+    closed: number;
+}
+
+export interface ContributorStats {
+    username: string;
+    prCount: number;
+    reviewCount: number;
+    linesChanged: number;
+    averageTimeToMerge: number;
+}
+
+export interface ReviewAnalyticsData {
+    totalReviews: number;
+    averageReviewsPerPR: number;
+    averageTimeToFirstReview: number;
+    averageTimeToApproval: number;
+    topReviewers: ReviewerStats[];
+    reviewPatterns: ReviewPatternData[];
+}
+
+export interface ReviewerStats {
+    username: string;
+    reviewCount: number;
+    approvalRate: number;
+    averageResponseTime: number;
+    changeRequestRate: number;
+}
+
+export interface ReviewPatternData {
+    date: string;
+    reviewsGiven: number;
+    approvalsGiven: number;
+    changeRequestsGiven: number;
+}
+
+export interface BranchPRAnalysis {
+    branches: BranchAnalytics;
+    pullRequests: PRAnalyticsData;
+    reviews: ReviewAnalyticsData;
+    analysisDate: string;
+    timePeriod: TimePeriod;
+}
+
+export interface BranchPRApiResponse extends GitHubApiResponse<BranchPRAnalysis> {
+    processingTime?: number;
+    dataPoints?: number;
+    rateLimitWarning?: boolean;
+}
+
 // API Response wrapper
 export interface GitHubApiResponse<T> {
     data?: T;
@@ -305,7 +435,7 @@ export function getRateLimitResetTime(rateLimit?: RateLimitInfo): string {
 }
 
 /**
- * Fetch commits with file information from GitHub API
+ * Fetch commits with file information from GitHub API with performance optimizations
  */
 export async function fetchCommitsWithFiles(
     owner: string,
@@ -313,8 +443,23 @@ export async function fetchCommitsWithFiles(
     since?: string,
     until?: string,
     page: number = 1,
-    perPage: number = 100
+    perPage: number = 100,
+    options: {
+        maxCommits?: number;
+        rateLimitThreshold?: number;
+        batchDelay?: number;
+        onProgress?: (processed: number, total: number) => void;
+        signal?: AbortSignal;
+    } = {}
 ): Promise<GitHubApiResponse<CommitFileData[]>> {
+    const {
+        maxCommits = 1000,
+        rateLimitThreshold = 50,
+        batchDelay = 100,
+        onProgress,
+        signal
+    } = options;
+
     let endpoint = `/repos/${owner}/${repo}/commits?page=${page}&per_page=${perPage}`;
 
     if (since) {
@@ -324,43 +469,81 @@ export async function fetchCommitsWithFiles(
         endpoint += `&until=${until}`;
     }
 
+    // Check if request was cancelled
+    if (signal?.aborted) {
+        return { error: 'Request was cancelled' };
+    }
+
     const response = await makeGitHubRequest<any[]>(endpoint);
 
     if (response.error || !response.data) {
         return response as GitHubApiResponse<CommitFileData[]>;
     }
 
-    // Fetch detailed commit information with file changes
+    // Limit commits to prevent excessive API usage
+    const commitsToProcess = response.data.slice(0, Math.min(response.data.length, maxCommits));
     const commitDetails: CommitFileData[] = [];
+    let rateLimitWarning = false;
 
-    for (const commit of response.data) {
-        const detailResponse = await makeGitHubRequest<any>(`/repos/${owner}/${repo}/commits/${commit.sha}`);
-
-        if (detailResponse.data && detailResponse.data.files) {
-            commitDetails.push({
-                sha: commit.sha,
-                date: commit.commit.author.date,
-                author: commit.commit.author.name,
-                message: commit.commit.message,
-                files: detailResponse.data.files.map((file: any) => ({
-                    filename: file.filename,
-                    status: file.status,
-                    changes: file.changes || 0,
-                    additions: file.additions || 0,
-                    deletions: file.deletions || 0,
-                })),
-            });
+    for (let i = 0; i < commitsToProcess.length; i++) {
+        // Check if request was cancelled
+        if (signal?.aborted) {
+            return { error: 'Request was cancelled' };
         }
 
-        // Check rate limit and break if getting close
-        if (detailResponse.rateLimit && detailResponse.rateLimit.remaining < 10) {
-            break;
+        const commit = commitsToProcess[i];
+
+        try {
+            const detailResponse = await makeGitHubRequest<any>(`/repos/${owner}/${repo}/commits/${commit.sha}`);
+
+            if (detailResponse.error) {
+                // Log error but continue processing other commits
+                console.warn(`Failed to fetch details for commit ${commit.sha}:`, detailResponse.error);
+                continue;
+            }
+
+            if (detailResponse.data && detailResponse.data.files) {
+                commitDetails.push({
+                    sha: commit.sha,
+                    date: commit.commit.author.date,
+                    author: commit.commit.author.name,
+                    message: commit.commit.message,
+                    files: detailResponse.data.files.map((file: any) => ({
+                        filename: file.filename,
+                        status: file.status,
+                        changes: file.changes || 0,
+                        additions: file.additions || 0,
+                        deletions: file.deletions || 0,
+                    })),
+                });
+            }
+
+            // Report progress
+            if (onProgress) {
+                onProgress(i + 1, commitsToProcess.length);
+            }
+
+            // Check rate limit and break if getting close
+            if (detailResponse.rateLimit && detailResponse.rateLimit.remaining < rateLimitThreshold) {
+                rateLimitWarning = true;
+                break;
+            }
+
+            // Add delay between requests to be respectful
+            if (i < commitsToProcess.length - 1 && batchDelay > 0) {
+                await new Promise(resolve => setTimeout(resolve, batchDelay));
+            }
+
+        } catch (error) {
+            console.warn(`Error processing commit ${commit.sha}:`, error);
+            continue;
         }
     }
 
     return {
         data: commitDetails,
         rateLimit: response.rateLimit,
+        ...(rateLimitWarning && { rateLimitWarning }),
     };
 }
 
@@ -702,5 +885,515 @@ export function processFileChangeData(
         analysisDate: new Date().toISOString(),
         timePeriod,
         fileTypeBreakdown,
+    };
+}
+
+/**
+ * Fetch repository branches from GitHub API
+ */
+export async function fetchBranches(
+    owner: string,
+    repo: string,
+    page: number = 1,
+    perPage: number = 100
+): Promise<GitHubApiResponse<any[]>> {
+    const endpoint = `/repos/${owner}/${repo}/branches?page=${page}&per_page=${perPage}`;
+    return makeGitHubRequest<any[]>(endpoint);
+}
+
+/**
+ * Fetch pull requests from GitHub API
+ */
+export async function fetchPullRequests(
+    owner: string,
+    repo: string,
+    state: 'open' | 'closed' | 'all' = 'all',
+    page: number = 1,
+    perPage: number = 100
+): Promise<GitHubApiResponse<any[]>> {
+    const endpoint = `/repos/${owner}/${repo}/pulls?state=${state}&page=${page}&per_page=${perPage}&sort=updated&direction=desc`;
+    return makeGitHubRequest<any[]>(endpoint);
+}
+
+/**
+ * Fetch pull request reviews from GitHub API
+ */
+export async function fetchPRReviews(
+    owner: string,
+    repo: string,
+    prNumber: number
+): Promise<GitHubApiResponse<any[]>> {
+    const endpoint = `/repos/${owner}/${repo}/pulls/${prNumber}/reviews`;
+    return makeGitHubRequest<any[]>(endpoint);
+}
+
+/**
+ * Fetch branch comparison data from GitHub API
+ */
+export async function fetchBranchComparison(
+    owner: string,
+    repo: string,
+    baseBranch: string,
+    headBranch: string
+): Promise<GitHubApiResponse<any>> {
+    const endpoint = `/repos/${owner}/${repo}/compare/${baseBranch}...${headBranch}`;
+    return makeGitHubRequest<any>(endpoint);
+}
+
+/**
+ * Process branch data and categorize by status
+ */
+export function processBranchData(
+    branches: any[],
+    defaultBranch: string,
+    timePeriod: TimePeriod
+): BranchData[] {
+    const now = new Date();
+    const staleThreshold = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000); // 90 days ago
+    const activeThreshold = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000); // 30 days ago
+
+    return branches.map(branch => {
+        const lastCommitDate = new Date(branch.commit.commit.author.date);
+        let status: 'active' | 'merged' | 'stale' = 'stale';
+
+        if (branch.name === defaultBranch) {
+            status = 'active';
+        } else if (lastCommitDate >= activeThreshold) {
+            status = 'active';
+        } else if (lastCommitDate < staleThreshold) {
+            status = 'stale';
+        }
+
+        return {
+            name: branch.name,
+            lastCommitDate: branch.commit.commit.author.date,
+            commitCount: 0, // Will be populated by additional API calls if needed
+            status,
+            isDefault: branch.name === defaultBranch,
+            ahead: 0, // Will be populated by comparison API if needed
+            behind: 0, // Will be populated by comparison API if needed
+            author: branch.commit.commit.author.name,
+            lastCommitSha: branch.commit.sha,
+            lastCommitMessage: branch.commit.commit.message,
+        };
+    });
+}
+
+/**
+ * Process pull request data and calculate metrics
+ */
+export function processPRData(pullRequests: any[], timePeriod: TimePeriod): PRData[] {
+    return pullRequests.map(pr => {
+        const createdAt = new Date(pr.created_at);
+        const mergedAt = pr.merged_at ? new Date(pr.merged_at) : undefined;
+        const closedAt = pr.closed_at ? new Date(pr.closed_at) : undefined;
+
+        let timeToMerge: number | undefined;
+        if (mergedAt) {
+            timeToMerge = Math.round((mergedAt.getTime() - createdAt.getTime()) / (1000 * 60 * 60)); // Hours
+        }
+
+        return {
+            number: pr.number,
+            title: pr.title,
+            state: pr.merged_at ? 'merged' : pr.state,
+            createdAt: pr.created_at,
+            mergedAt: pr.merged_at,
+            closedAt: pr.closed_at,
+            author: pr.user.login,
+            reviewCount: 0, // Will be populated by review API calls
+            timeToMerge,
+            linesChanged: (pr.additions || 0) + (pr.deletions || 0),
+            additions: pr.additions || 0,
+            deletions: pr.deletions || 0,
+            reviewers: [], // Will be populated by review API calls
+            labels: pr.labels?.map((label: any) => label.name) || [],
+            isDraft: pr.draft || false,
+        };
+    });
+}
+
+/**
+ * Calculate PR analytics from processed data
+ */
+export function calculatePRAnalytics(
+    pullRequests: PRData[],
+    timePeriod: TimePeriod
+): PRAnalyticsData {
+    const totalPRs = pullRequests.length;
+    const openPRs = pullRequests.filter(pr => pr.state === 'open').length;
+    const closedPRs = pullRequests.filter(pr => pr.state === 'closed').length;
+    const mergedPRs = pullRequests.filter(pr => pr.state === 'merged').length;
+
+    // Calculate averages
+    const mergedPRsWithTime = pullRequests.filter(pr => pr.timeToMerge !== undefined);
+    const averageTimeToMerge = mergedPRsWithTime.length > 0
+        ? mergedPRsWithTime.reduce((sum, pr) => sum + (pr.timeToMerge || 0), 0) / mergedPRsWithTime.length
+        : 0;
+
+    const averagePRSize = pullRequests.length > 0
+        ? pullRequests.reduce((sum, pr) => sum + pr.linesChanged, 0) / pullRequests.length
+        : 0;
+
+    // Generate timeline data
+    const timeline = generatePRTimeline(pullRequests, timePeriod);
+
+    // Calculate top contributors
+    const contributorMap = new Map<string, ContributorStats>();
+    pullRequests.forEach(pr => {
+        const existing = contributorMap.get(pr.author) || {
+            username: pr.author,
+            prCount: 0,
+            reviewCount: 0,
+            linesChanged: 0,
+            averageTimeToMerge: 0,
+        };
+
+        existing.prCount += 1;
+        existing.linesChanged += pr.linesChanged;
+        if (pr.timeToMerge) {
+            existing.averageTimeToMerge = (existing.averageTimeToMerge + pr.timeToMerge) / 2;
+        }
+
+        contributorMap.set(pr.author, existing);
+    });
+
+    const topContributors = Array.from(contributorMap.values())
+        .sort((a, b) => b.prCount - a.prCount)
+        .slice(0, 10);
+
+    return {
+        totalPRs,
+        openPRs,
+        closedPRs,
+        mergedPRs,
+        averageTimeToMerge: Math.round(averageTimeToMerge),
+        averageReviewTime: 0, // Will be calculated with review data
+        averagePRSize: Math.round(averagePRSize),
+        pullRequests,
+        timeline,
+        topContributors,
+    };
+}
+
+/**
+ * Generate PR timeline data for visualization
+ */
+export function generatePRTimeline(
+    pullRequests: PRData[],
+    timePeriod: TimePeriod
+): PRTimelineData[] {
+    const timelineMap = new Map<string, PRTimelineData>();
+
+    pullRequests.forEach(pr => {
+        const createdDate = new Date(pr.createdAt).toISOString().split('T')[0];
+        const mergedDate = pr.mergedAt ? new Date(pr.mergedAt).toISOString().split('T')[0] : null;
+        const closedDate = pr.closedAt ? new Date(pr.closedAt).toISOString().split('T')[0] : null;
+
+        // Track opened PRs
+        const createdEntry = timelineMap.get(createdDate) || {
+            date: createdDate,
+            opened: 0,
+            merged: 0,
+            closed: 0,
+        };
+        createdEntry.opened += 1;
+        timelineMap.set(createdDate, createdEntry);
+
+        // Track merged PRs
+        if (mergedDate) {
+            const mergedEntry = timelineMap.get(mergedDate) || {
+                date: mergedDate,
+                opened: 0,
+                merged: 0,
+                closed: 0,
+            };
+            mergedEntry.merged += 1;
+            timelineMap.set(mergedDate, mergedEntry);
+        }
+
+        // Track closed PRs (non-merged)
+        if (closedDate && !mergedDate) {
+            const closedEntry = timelineMap.get(closedDate) || {
+                date: closedDate,
+                opened: 0,
+                merged: 0,
+                closed: 0,
+            };
+            closedEntry.closed += 1;
+            timelineMap.set(closedDate, closedEntry);
+        }
+    });
+
+    return Array.from(timelineMap.values())
+        .sort((a, b) => a.date.localeCompare(b.date));
+}
+
+/**
+ * Calculate branch analytics from processed data
+ */
+export function calculateBranchAnalytics(
+    branches: BranchData[],
+    timePeriod: TimePeriod
+): BranchAnalytics {
+    const totalBranches = branches.length;
+    const activeBranches = branches.filter(b => b.status === 'active').length;
+    const mergedBranches = branches.filter(b => b.status === 'merged').length;
+    const staleBranches = branches.filter(b => b.status === 'stale').length;
+
+    // Generate branch activity timeline (simplified for now)
+    const branchActivity: BranchActivityData[] = [];
+
+    return {
+        totalBranches,
+        activeBranches,
+        mergedBranches,
+        staleBranches,
+        branches: branches.sort((a, b) => new Date(b.lastCommitDate).getTime() - new Date(a.lastCommitDate).getTime()),
+        branchActivity,
+    };
+}
+
+/**
+ * Process review data and calculate review metrics
+ */
+export function processReviewData(reviews: any[], pullRequests: PRData[]): ReviewAnalyticsData {
+    const reviewMap = new Map<number, ReviewData>();
+    const reviewerStatsMap = new Map<string, ReviewerStats>();
+
+    // Process reviews for each PR
+    reviews.forEach(review => {
+        const prNumber = review.pull_request_number;
+        const existing: ReviewData = reviewMap.get(prNumber) || {
+            prNumber,
+            reviewers: [],
+            reviewCount: 0,
+            approvalCount: 0,
+            changeRequestCount: 0,
+            commentCount: 0,
+            reviews: [],
+        };
+
+        existing.reviewCount += 1;
+        existing.reviews.push({
+            reviewer: review.user.login,
+            state: review.state as 'APPROVED' | 'CHANGES_REQUESTED' | 'COMMENTED',
+            submittedAt: review.submitted_at,
+        });
+
+        if (!existing.reviewers.includes(review.user.login)) {
+            existing.reviewers.push(review.user.login);
+        }
+
+        switch (review.state) {
+            case 'APPROVED':
+                existing.approvalCount += 1;
+                break;
+            case 'CHANGES_REQUESTED':
+                existing.changeRequestCount += 1;
+                break;
+            case 'COMMENTED':
+                existing.commentCount += 1;
+                break;
+        }
+
+        reviewMap.set(prNumber, existing);
+
+        // Update reviewer stats
+        const reviewerStats = reviewerStatsMap.get(review.user.login) || {
+            username: review.user.login,
+            reviewCount: 0,
+            approvalRate: 0,
+            averageResponseTime: 0,
+            changeRequestRate: 0,
+        };
+
+        reviewerStats.reviewCount += 1;
+        reviewerStatsMap.set(review.user.login, reviewerStats);
+    });
+
+    // Calculate reviewer statistics
+    const topReviewers = Array.from(reviewerStatsMap.values())
+        .map(reviewer => {
+            const reviewerReviews = reviews.filter(r => r.user.login === reviewer.username);
+            const approvals = reviewerReviews.filter(r => r.state === 'APPROVED').length;
+            const changeRequests = reviewerReviews.filter(r => r.state === 'CHANGES_REQUESTED').length;
+
+            return {
+                ...reviewer,
+                approvalRate: reviewer.reviewCount > 0 ? (approvals / reviewer.reviewCount) * 100 : 0,
+                changeRequestRate: reviewer.reviewCount > 0 ? (changeRequests / reviewer.reviewCount) * 100 : 0,
+                averageResponseTime: 0, // Would need PR creation times to calculate
+            };
+        })
+        .sort((a, b) => b.reviewCount - a.reviewCount)
+        .slice(0, 10);
+
+    const totalReviews = reviews.length;
+    const reviewsArray = Array.from(reviewMap.values());
+    const averageReviewsPerPR = pullRequests.length > 0 ? totalReviews / pullRequests.length : 0;
+
+    return {
+        totalReviews,
+        averageReviewsPerPR,
+        averageTimeToFirstReview: 0, // Would need detailed timing data
+        averageTimeToApproval: 0, // Would need detailed timing data
+        topReviewers,
+        reviewPatterns: [], // Would be generated from timeline data
+    };
+}
+
+/**
+ * Filter branch and PR data by time period
+ */
+export function filterBranchPRDataByTimePeriod<T extends { createdAt?: string; lastCommitDate?: string }>(
+    data: T[],
+    timePeriod: TimePeriod,
+    dateField: 'createdAt' | 'lastCommitDate' = 'createdAt'
+): T[] {
+    if (timePeriod === 'all') {
+        return data;
+    }
+
+    const bounds = getTimePeriodBounds(timePeriod);
+    if (!bounds.since) {
+        return data;
+    }
+
+    const sinceDate = new Date(bounds.since);
+    return data.filter(item => {
+        const itemDate = item[dateField];
+        return itemDate && new Date(itemDate) >= sinceDate;
+    });
+}
+
+/**
+ * Calculate PR size categories
+ */
+export function categorizePRSize(linesChanged: number): 'XS' | 'S' | 'M' | 'L' | 'XL' {
+    if (linesChanged <= 10) return 'XS';
+    if (linesChanged <= 50) return 'S';
+    if (linesChanged <= 200) return 'M';
+    if (linesChanged <= 500) return 'L';
+    return 'XL';
+}
+
+/**
+ * Calculate branch health score based on activity and age
+ */
+export function calculateBranchHealthScore(branch: BranchData): number {
+    const now = new Date();
+    const lastCommit = new Date(branch.lastCommitDate);
+    const daysSinceLastCommit = Math.floor((now.getTime() - lastCommit.getTime()) / (1000 * 60 * 60 * 24));
+
+    let score = 100;
+
+    // Deduct points for staleness
+    if (daysSinceLastCommit > 90) {
+        score -= 50;
+    } else if (daysSinceLastCommit > 30) {
+        score -= 25;
+    } else if (daysSinceLastCommit > 7) {
+        score -= 10;
+    }
+
+    // Bonus for default branch
+    if (branch.isDefault) {
+        score = Math.min(100, score + 20);
+    }
+
+    // Deduct points if far behind
+    if (branch.behind > 50) {
+        score -= 20;
+    } else if (branch.behind > 10) {
+        score -= 10;
+    }
+
+    return Math.max(0, score);
+}
+
+/**
+ * Analyze PR patterns and identify trends
+ */
+export function analyzePRPatterns(pullRequests: PRData[]): {
+    averagePRsPerWeek: number;
+    peakActivity: { day: string; count: number };
+    sizeDistribution: Record<string, number>;
+    mergeRate: number;
+    averageReviewCycle: number;
+} {
+    // Calculate PRs per week
+    const weeklyPRs = new Map<string, number>();
+    pullRequests.forEach(pr => {
+        const date = new Date(pr.createdAt);
+        const weekStart = new Date(date);
+        weekStart.setDate(date.getDate() - date.getDay());
+        const weekKey = weekStart.toISOString().split('T')[0];
+        weeklyPRs.set(weekKey, (weeklyPRs.get(weekKey) || 0) + 1);
+    });
+
+    const averagePRsPerWeek = weeklyPRs.size > 0 
+        ? Array.from(weeklyPRs.values()).reduce((sum, count) => sum + count, 0) / weeklyPRs.size 
+        : 0;
+
+    // Find peak activity day
+    const dailyActivity = new Map<string, number>();
+    pullRequests.forEach(pr => {
+        const dayOfWeek = new Date(pr.createdAt).toLocaleDateString('en-US', { weekday: 'long' });
+        dailyActivity.set(dayOfWeek, (dailyActivity.get(dayOfWeek) || 0) + 1);
+    });
+
+    const peakActivity = Array.from(dailyActivity.entries())
+        .reduce((max, [day, count]) => count > max.count ? { day, count } : max, { day: 'Monday', count: 0 });
+
+    // Size distribution
+    const sizeDistribution: Record<string, number> = { XS: 0, S: 0, M: 0, L: 0, XL: 0 };
+    pullRequests.forEach(pr => {
+        const size = categorizePRSize(pr.linesChanged);
+        sizeDistribution[size] += 1;
+    });
+
+    // Merge rate
+    const mergedCount = pullRequests.filter(pr => pr.state === 'merged').length;
+    const mergeRate = pullRequests.length > 0 ? (mergedCount / pullRequests.length) * 100 : 0;
+
+    return {
+        averagePRsPerWeek: Math.round(averagePRsPerWeek * 10) / 10,
+        peakActivity,
+        sizeDistribution,
+        mergeRate: Math.round(mergeRate * 10) / 10,
+        averageReviewCycle: 0, // Would need review timing data
+    };
+}
+
+/**
+ * Generate comprehensive branch and PR analysis
+ */
+export function generateBranchPRAnalysis(
+    branches: any[],
+    pullRequests: any[],
+    reviews: any[],
+    defaultBranch: string,
+    timePeriod: TimePeriod
+): BranchPRAnalysis {
+    // Process raw data
+    const processedBranches = processBranchData(branches, defaultBranch, timePeriod);
+    const processedPRs = processPRData(pullRequests, timePeriod);
+
+    // Filter by time period
+    const filteredBranches = filterBranchPRDataByTimePeriod(processedBranches, timePeriod, 'lastCommitDate');
+    const filteredPRs = filterBranchPRDataByTimePeriod(processedPRs, timePeriod, 'createdAt');
+
+    // Calculate analytics
+    const branchAnalytics = calculateBranchAnalytics(filteredBranches, timePeriod);
+    const prAnalytics = calculatePRAnalytics(filteredPRs, timePeriod);
+    const reviewAnalytics = processReviewData(reviews, filteredPRs);
+
+    return {
+        branches: branchAnalytics,
+        pullRequests: prAnalytics,
+        reviews: reviewAnalytics,
+        analysisDate: new Date().toISOString(),
+        timePeriod,
     };
 }

@@ -15,6 +15,7 @@ import { TimePeriodFilter } from './TimePeriodFilter';
 import { FileChangeList } from './FileChangeList';
 import { FileChangeTrend } from './FileChangeTrend';
 import { FileTypeBreakdown } from './FileTypeBreakdown';
+import { ProgressIndicator } from './ProgressIndicator';
 
 interface MostChangedFilesProps {
   owner: string;
@@ -29,6 +30,11 @@ interface MostChangedFilesState {
   selectedFile: string | null;
   rawCommits: CommitFileData[];
   rateLimitWarning: boolean;
+  progress: {
+    current: number;
+    total: number;
+    message: string;
+  } | null;
 }
 
 export function MostChangedFiles({ 
@@ -44,6 +50,7 @@ export function MostChangedFiles({
     selectedFile: null,
     rawCommits: [],
     rateLimitWarning: false,
+    progress: null,
   });
 
   // Memoize the filtered analysis based on time period
@@ -55,7 +62,7 @@ export function MostChangedFiles({
   }, [state.rawCommits, timePeriod]);
 
   // Fetch commit data with file information
-  const fetchFileChangeData = useCallback(async () => {
+  const fetchFileChangeData = useCallback(async (abortSignal?: AbortSignal) => {
     setState(prev => ({ ...prev, loading: true, error: null }));
 
     try {
@@ -73,10 +80,29 @@ export function MostChangedFiles({
           undefined, // We'll filter by time period after fetching
           undefined,
           page,
-          perPage
+          perPage,
+          {
+            maxCommits: 100, // Limit per page for performance
+            rateLimitThreshold: 50,
+            batchDelay: 100,
+            onProgress: (processed, total) => {
+              setState(prev => ({
+                ...prev,
+                progress: {
+                  current: processed,
+                  total,
+                  message: `Processing commits (page ${page})...`,
+                },
+              }));
+            },
+            signal: abortSignal,
+          }
         );
 
         if (response.error) {
+          if (response.error === 'Request was cancelled') {
+            return; // Don't update state if cancelled
+          }
           setState(prev => ({
             ...prev,
             loading: false,
@@ -95,8 +121,19 @@ export function MostChangedFiles({
             rateLimitWarning = true;
             hasMore = false; // Stop fetching to preserve rate limit
           }
+
+          // Check for rate limit warning from the API
+          if ((response as any).rateLimitWarning) {
+            rateLimitWarning = true;
+            hasMore = false;
+          }
         } else {
           hasMore = false;
+        }
+
+        // Check if cancelled between requests
+        if (abortSignal?.aborted) {
+          return;
         }
 
         // Add a small delay between requests to be respectful
@@ -110,9 +147,13 @@ export function MostChangedFiles({
         rawCommits: allCommits,
         loading: false,
         rateLimitWarning,
+        progress: null, // Clear progress when done
       }));
 
     } catch (error) {
+      if (abortSignal?.aborted) {
+        return; // Don't update state if cancelled
+      }
       setState(prev => ({
         ...prev,
         loading: false,
@@ -121,9 +162,14 @@ export function MostChangedFiles({
     }
   }, [owner, repo]);
 
-  // Initial data fetch
+  // Initial data fetch with cleanup
   useEffect(() => {
-    fetchFileChangeData();
+    const abortController = new AbortController();
+    fetchFileChangeData(abortController.signal);
+    
+    return () => {
+      abortController.abort();
+    };
   }, [fetchFileChangeData]);
 
   // Handle time period changes
@@ -215,6 +261,19 @@ export function MostChangedFiles({
         )}
       </div>
 
+      {/* Progress Indicator */}
+      {state.progress && state.loading && (
+        <ProgressIndicator
+          progress={state.progress.current}
+          total={state.progress.total}
+          message={state.progress.message}
+          onCancel={() => {
+            // Cancel will be handled by the AbortController cleanup
+            setState(prev => ({ ...prev, loading: false, progress: null }));
+          }}
+        />
+      )}
+
       {/* Time Period Filter */}
       <TimePeriodFilter
         selectedPeriod={timePeriod}
@@ -230,7 +289,7 @@ export function MostChangedFiles({
             files={filteredAnalysis?.files || []}
             isLoading={state.loading}
             onFileSelect={handleFileSelect}
-            selectedFile={state.selectedFile}
+            selectedFile={state.selectedFile || undefined}
           />
         </div>
 

@@ -4,6 +4,7 @@ import { CommitChart } from '@/components/CommitChart';
 import { Contributors } from '@/components/Contributors';
 import { RepoForm } from '@/components/RepoForm';
 import { MostChangedFiles } from '@/components/MostChangedFiles';
+import { BranchPRStats } from '@/components/BranchPRStats';
 
 interface PageProps {
   params: Promise<{
@@ -163,6 +164,11 @@ export default async function AnalyzePage({ params }: PageProps) {
           <div className="bg-white dark:bg-gray-800 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700 p-4 sm:p-6">
             <MostChangedFiles owner={owner} repo={repo} />
           </div>
+        </section>
+
+        {/* Branch & Pull Request Analytics */}
+        <section className="mb-6" aria-label="Branch and pull request analytics">
+          <BranchPRStats owner={owner} repo={repo} />
         </section>
       </div>
     </div>

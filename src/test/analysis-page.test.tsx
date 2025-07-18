@@ -155,7 +155,7 @@ describe('Analysis Page Integration Tests', () => {
 
     it('handles missing contributors data gracefully', async () => {
       vi.mocked(githubApi.fetchContributors).mockResolvedValue({
-        data: null,
+        data: undefined,
       });
 
       const params = Promise.resolve({ owner: 'facebook', repo: 'react' });
@@ -169,7 +169,7 @@ describe('Analysis Page Integration Tests', () => {
 
     it('handles missing commit activity data gracefully', async () => {
       vi.mocked(githubApi.fetchCommitActivity).mockResolvedValue({
-        data: null,
+        data: undefined,
       });
 
       const params = Promise.resolve({ owner: 'facebook', repo: 'react' });
