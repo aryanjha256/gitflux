@@ -227,8 +227,20 @@ export function CommitChart({ owner, repo, data }: CommitChartProps) {
       <div className="p-4 sm:p-6">
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between mb-4 gap-2">
           <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Commit Activity</h3>
-          <div className="text-sm text-gray-500 dark:text-gray-400">
-            Last {state.data.length} weeks
+          <div className="flex items-center gap-3">
+            <div className="text-sm text-gray-500 dark:text-gray-400">
+              Last {state.data.length} weeks
+            </div>
+            <a
+              href={`/analyze/${owner}/${repo}/activity`}
+              className="inline-flex items-center px-3 py-1 text-xs font-medium text-blue-700 bg-blue-50 border border-blue-200 rounded-md hover:bg-blue-100 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 dark:text-blue-200 dark:bg-blue-900/20 dark:border-blue-800 dark:hover:bg-blue-900/30 transition-colors"
+              aria-label={`View detailed activity analysis for ${owner}/${repo}`}
+            >
+              <svg className="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+              </svg>
+              Detailed Analysis
+            </a>
           </div>
         </div>
         

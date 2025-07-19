@@ -291,88 +291,145 @@ function getGitHubHeaders(): Record<string, string> {
 }
 
 /**
- * Make a request to the GitHub API with proper error handling
+ * Make a request to the GitHub API with proper error handling and retry mechanism
  */
-async function makeGitHubRequest<T>(endpoint: string): Promise<GitHubApiResponse<T>> {
-    try {
-        const response = await fetch(`${GITHUB_API_BASE}${endpoint}`, {
-            headers: getGitHubHeaders(),
-        });
-
-        const rateLimit = extractRateLimit(response.headers);
-
-        if (!response.ok) {
-            if (response.status === 404) {
-                return {
-                    error: 'Repository not found',
-                    rateLimit,
-                };
+async function makeGitHubRequest<T>(
+    endpoint: string, 
+    options: { 
+        retries?: number; 
+        retryDelay?: number;
+        signal?: AbortSignal;
+    } = {}
+): Promise<GitHubApiResponse<T>> {
+    const { retries = 3, retryDelay = 1000, signal } = options;
+    for (let attempt = 0; attempt <= retries; attempt++) {
+        try {
+            // Check if request was cancelled
+            if (signal?.aborted) {
+                return { error: 'Request was cancelled' };
             }
 
-            if (response.status === 403) {
-                const errorData = await response.json().catch(() => ({}));
-                if (errorData.message?.includes('rate limit')) {
+            const response = await fetch(`${GITHUB_API_BASE}${endpoint}`, {
+                headers: getGitHubHeaders(),
+                signal,
+            });
+
+            const rateLimit = extractRateLimit(response.headers);
+
+            if (!response.ok) {
+                if (response.status === 404) {
                     return {
-                        error: 'GitHub API rate limit exceeded. Please try again later.',
+                        error: 'Repository not found',
                         rateLimit,
                     };
                 }
+
+                if (response.status === 403) {
+                    const errorData = await response.json().catch(() => ({}));
+                    if (errorData.message?.includes('rate limit')) {
+                        return {
+                            error: 'GitHub API rate limit exceeded. Please try again later.',
+                            rateLimit,
+                        };
+                    }
+                    return {
+                        error: 'Access forbidden. Repository may be private or require authentication.',
+                        rateLimit,
+                    };
+                }
+
+                if (response.status >= 500 && attempt < retries) {
+                    // Retry on server errors with exponential backoff
+                    const delay = retryDelay * Math.pow(2, attempt);
+                    await new Promise(resolve => setTimeout(resolve, delay));
+                    continue;
+                }
+
+                if (response.status >= 500) {
+                    return {
+                        error: 'GitHub API is currently unavailable. Please try again later.',
+                        rateLimit,
+                    };
+                }
+
                 return {
-                    error: 'Access forbidden. Repository may be private or require authentication.',
+                    error: `GitHub API error: ${response.status} ${response.statusText}`,
                     rateLimit,
                 };
             }
 
-            if (response.status >= 500) {
-                return {
-                    error: 'GitHub API is currently unavailable. Please try again later.',
-                    rateLimit,
-                };
-            }
-
+            const data = await response.json();
             return {
-                error: `GitHub API error: ${response.status} ${response.statusText}`,
+                data,
                 rateLimit,
             };
-        }
+        } catch (error) {
+            // Check if it's an abort error
+            if (error instanceof Error && error.name === 'AbortError') {
+                return { error: 'Request was cancelled' };
+            }
 
-        const data = await response.json();
-        return {
-            data,
-            rateLimit,
-        };
-    } catch (error) {
-        if (error instanceof TypeError && error.message.includes('fetch')) {
-            return {
-                error: 'Network error. Please check your internet connection and try again.',
-            };
-        }
+            // Retry on network errors
+            if (error instanceof TypeError && error.message.includes('fetch') && attempt < retries) {
+                const delay = retryDelay * Math.pow(2, attempt);
+                await new Promise(resolve => setTimeout(resolve, delay));
+                continue;
+            }
 
-        return {
-            error: 'An unexpected error occurred while fetching data from GitHub.',
-        };
+            if (error instanceof TypeError && error.message.includes('fetch')) {
+                return {
+                    error: 'Network error. Please check your internet connection and try again.',
+                };
+            }
+
+            if (attempt === retries) {
+                return {
+                    error: 'An unexpected error occurred while fetching data from GitHub.',
+                };
+            }
+
+            // Wait before retrying
+            const delay = retryDelay * Math.pow(2, attempt);
+            await new Promise(resolve => setTimeout(resolve, delay));
+        }
     }
+
+    return {
+        error: 'Maximum retry attempts exceeded.',
+    };
 }
 
 /**
  * Fetch repository information from GitHub API
  */
-export async function fetchRepository(owner: string, repo: string): Promise<GitHubApiResponse<Repository>> {
-    return makeGitHubRequest<Repository>(`/repos/${owner}/${repo}`);
+export async function fetchRepository(
+    owner: string, 
+    repo: string,
+    options?: { signal?: AbortSignal }
+): Promise<GitHubApiResponse<Repository>> {
+    return makeGitHubRequest<Repository>(`/repos/${owner}/${repo}`, options);
 }
 
 /**
  * Fetch repository contributors from GitHub API
  */
-export async function fetchContributors(owner: string, repo: string): Promise<GitHubApiResponse<Contributor[]>> {
-    return makeGitHubRequest<Contributor[]>(`/repos/${owner}/${repo}/contributors`);
+export async function fetchContributors(
+    owner: string, 
+    repo: string,
+    options?: { signal?: AbortSignal }
+): Promise<GitHubApiResponse<Contributor[]>> {
+    return makeGitHubRequest<Contributor[]>(`/repos/${owner}/${repo}/contributors`, options);
 }
 
 /**
  * Fetch commit activity statistics from GitHub API
  */
-export async function fetchCommitActivity(owner: string, repo: string): Promise<GitHubApiResponse<CommitActivity[]>> {
-    return makeGitHubRequest<CommitActivity[]>(`/repos/${owner}/${repo}/stats/commit_activity`);
+export async function fetchCommitActivity(
+    owner: string, 
+    repo: string,
+    options?: { signal?: AbortSignal }
+): Promise<GitHubApiResponse<CommitActivity[]>> {
+    return makeGitHubRequest<CommitActivity[]>(`/repos/${owner}/${repo}/stats/commit_activity`, options);
 }
 
 /**
@@ -938,6 +995,407 @@ export async function fetchBranchComparison(
 ): Promise<GitHubApiResponse<any>> {
     const endpoint = `/repos/${owner}/${repo}/compare/${baseBranch}...${headBranch}`;
     return makeGitHubRequest<any>(endpoint);
+}
+
+// Commit activity specific types
+export interface CommitActivityResponse {
+    commits: GitHubCommit[];
+    contributors: GitHubContributor[];
+    dateRange: { start: string; end: string };
+}
+
+export interface GitHubCommit {
+    sha: string;
+    commit: {
+        author: {
+            name: string;
+            email: string;
+            date: string;
+        };
+        message: string;
+    };
+    author: {
+        login: string;
+        avatar_url: string;
+    } | null;
+}
+
+export interface GitHubContributor {
+    login: string;
+    avatar_url: string;
+    contributions: number;
+    html_url: string;
+    type: string;
+}
+
+// Cache interface for commit activity data
+interface CommitActivityCache {
+    [key: string]: {
+        data: CommitActivityResponse;
+        timestamp: number;
+        expiresAt: number;
+    };
+}
+
+// In-memory cache for commit activity data
+const commitActivityCache: CommitActivityCache = {};
+const CACHE_DURATION = 15 * 60 * 1000; // 15 minutes
+
+/**
+ * Generate cache key for commit activity data
+ */
+function generateCacheKey(owner: string, repo: string, timeRange: string, since?: string, until?: string): string {
+    return `${owner}/${repo}:${timeRange}:${since || 'all'}:${until || 'now'}`;
+}
+
+/**
+ * Check if cached data is still valid
+ */
+function isCacheValid(cacheEntry: CommitActivityCache[string]): boolean {
+    return Date.now() < cacheEntry.expiresAt;
+}
+
+/**
+ * Fetch commits with contributor information for specified time ranges
+ * Includes caching mechanism and enhanced error handling for commit activity endpoints
+ */
+export async function fetchCommitActivityData(
+    owner: string,
+    repo: string,
+    timeRange: '30d' | '3m' | '6m' | '1y' = '30d',
+    options: {
+        maxCommits?: number;
+        rateLimitThreshold?: number;
+        batchDelay?: number;
+        onProgress?: (processed: number, total: number) => void;
+        signal?: AbortSignal;
+        useCache?: boolean;
+    } = {}
+): Promise<GitHubApiResponse<CommitActivityResponse>> {
+    const {
+        maxCommits = 1000,
+        rateLimitThreshold = 50,
+        batchDelay = 100,
+        onProgress,
+        signal,
+        useCache = true
+    } = options;
+
+    // Calculate time bounds
+    const bounds = getTimePeriodBounds(timeRange);
+    const cacheKey = generateCacheKey(owner, repo, timeRange, bounds.since, bounds.until);
+
+    // Check cache first
+    if (useCache && commitActivityCache[cacheKey] && isCacheValid(commitActivityCache[cacheKey])) {
+        return {
+            data: commitActivityCache[cacheKey].data,
+            rateLimit: undefined // Cache hit doesn't consume rate limit
+        };
+    }
+
+    // Check if request was cancelled
+    if (signal?.aborted) {
+        return { error: 'Request was cancelled' };
+    }
+
+    try {
+        // Fetch commits with pagination
+        const commits: GitHubCommit[] = [];
+        let page = 1;
+        const perPage = 100;
+        let hasMorePages = true;
+        let rateLimitWarning = false;
+
+        while (hasMorePages && commits.length < maxCommits) {
+            if (signal?.aborted) {
+                return { error: 'Request was cancelled' };
+            }
+
+            let endpoint = `/repos/${owner}/${repo}/commits?page=${page}&per_page=${perPage}`;
+            if (bounds.since) endpoint += `&since=${bounds.since}`;
+            if (bounds.until) endpoint += `&until=${bounds.until}`;
+
+            const response = await makeGitHubRequest<GitHubCommit[]>(endpoint);
+
+            if (response.error) {
+                return response as GitHubApiResponse<CommitActivityResponse>;
+            }
+
+            if (!response.data || response.data.length === 0) {
+                hasMorePages = false;
+                break;
+            }
+
+            commits.push(...response.data);
+
+            // Check rate limit
+            if (response.rateLimit && response.rateLimit.remaining < rateLimitThreshold) {
+                rateLimitWarning = true;
+                break;
+            }
+
+            // Report progress
+            if (onProgress) {
+                onProgress(commits.length, Math.min(maxCommits, commits.length + response.data.length));
+            }
+
+            // Check if we got fewer results than requested (last page)
+            if (response.data.length < perPage) {
+                hasMorePages = false;
+            }
+
+            page++;
+
+            // Add delay between requests
+            if (hasMorePages && batchDelay > 0) {
+                await new Promise(resolve => setTimeout(resolve, batchDelay));
+            }
+        }
+
+        // Limit commits to maxCommits
+        const limitedCommits = commits.slice(0, maxCommits);
+
+        // Fetch contributors separately for better performance
+        const contributorsResponse = await fetchContributors(owner, repo);
+        const contributors = contributorsResponse.data || [];
+
+        const activityData: CommitActivityResponse = {
+            commits: limitedCommits,
+            contributors,
+            dateRange: {
+                start: bounds.since || limitedCommits[limitedCommits.length - 1]?.commit.author.date || new Date().toISOString(),
+                end: bounds.until || limitedCommits[0]?.commit.author.date || new Date().toISOString()
+            }
+        };
+
+        // Cache the result
+        if (useCache) {
+            commitActivityCache[cacheKey] = {
+                data: activityData,
+                timestamp: Date.now(),
+                expiresAt: Date.now() + CACHE_DURATION
+            };
+        }
+
+        return {
+            data: activityData,
+            rateLimit: contributorsResponse.rateLimit,
+            ...(rateLimitWarning && { rateLimitWarning })
+        };
+
+    } catch (error) {
+        if (error instanceof TypeError && error.message.includes('fetch')) {
+            return {
+                error: 'Network error while fetching commit activity data. Please check your internet connection and try again.',
+            };
+        }
+
+        return {
+            error: 'An unexpected error occurred while fetching commit activity data from GitHub.',
+        };
+    }
+}
+
+/**
+ * Fetch commits for a specific contributor within a time range
+ * Optimized for contributor trend analysis
+ */
+export async function fetchContributorCommits(
+    owner: string,
+    repo: string,
+    contributor: string,
+    timeRange: '30d' | '3m' | '6m' | '1y' = '30d',
+    options: {
+        maxCommits?: number;
+        signal?: AbortSignal;
+        useCache?: boolean;
+    } = {}
+): Promise<GitHubApiResponse<GitHubCommit[]>> {
+    const { maxCommits = 500, signal, useCache = true } = options;
+
+    const bounds = getTimePeriodBounds(timeRange);
+    const cacheKey = generateCacheKey(owner, repo, `contributor-${contributor}`, bounds.since, bounds.until);
+
+    // Check cache first
+    if (useCache && commitActivityCache[cacheKey] && isCacheValid(commitActivityCache[cacheKey])) {
+        return {
+            data: commitActivityCache[cacheKey].data.commits,
+        };
+    }
+
+    if (signal?.aborted) {
+        return { error: 'Request was cancelled' };
+    }
+
+    try {
+        let endpoint = `/repos/${owner}/${repo}/commits?author=${contributor}&per_page=100`;
+        if (bounds.since) endpoint += `&since=${bounds.since}`;
+        if (bounds.until) endpoint += `&until=${bounds.until}`;
+
+        const response = await makeGitHubRequest<GitHubCommit[]>(endpoint);
+
+        if (response.error || !response.data) {
+            return response as GitHubApiResponse<GitHubCommit[]>;
+        }
+
+        const limitedCommits = response.data.slice(0, maxCommits);
+
+        // Cache the result
+        if (useCache) {
+            commitActivityCache[cacheKey] = {
+                data: {
+                    commits: limitedCommits,
+                    contributors: [],
+                    dateRange: {
+                        start: bounds.since || new Date().toISOString(),
+                        end: bounds.until || new Date().toISOString()
+                    }
+                },
+                timestamp: Date.now(),
+                expiresAt: Date.now() + CACHE_DURATION
+            };
+        }
+
+        return {
+            data: limitedCommits,
+            rateLimit: response.rateLimit
+        };
+
+    } catch (error) {
+        if (error instanceof TypeError && error.message.includes('fetch')) {
+            return {
+                error: 'Network error while fetching contributor commits. Please check your internet connection and try again.',
+            };
+        }
+
+        return {
+            error: 'An unexpected error occurred while fetching contributor commits from GitHub.',
+        };
+    }
+}
+
+/**
+ * Clear commit activity cache (useful for testing or manual cache invalidation)
+ */
+export function clearCommitActivityCache(owner?: string, repo?: string): void {
+    if (owner && repo) {
+        // Clear cache for specific repository
+        const prefix = `${owner}/${repo}:`;
+        Object.keys(commitActivityCache).forEach(key => {
+            if (key.startsWith(prefix)) {
+                delete commitActivityCache[key];
+            }
+        });
+    } else {
+        // Clear entire cache
+        Object.keys(commitActivityCache).forEach(key => {
+            delete commitActivityCache[key];
+        });
+    }
+}
+
+/**
+ * Get cache statistics for monitoring and debugging
+ */
+export function getCommitActivityCacheStats(): {
+    totalEntries: number;
+    validEntries: number;
+    expiredEntries: number;
+    cacheHitRate?: number;
+} {
+    const totalEntries = Object.keys(commitActivityCache).length;
+    let validEntries = 0;
+    let expiredEntries = 0;
+
+    Object.values(commitActivityCache).forEach(entry => {
+        if (isCacheValid(entry)) {
+            validEntries++;
+        } else {
+            expiredEntries++;
+        }
+    });
+
+    return {
+        totalEntries,
+        validEntries,
+        expiredEntries
+    };
+}
+
+/**
+ * Enhanced error handling specifically for commit activity endpoints
+ * Provides more specific error messages and retry suggestions
+ */
+export function handleCommitActivityError(error: any, context: string): string {
+    if (error?.status === 403) {
+        if (error.message?.includes('rate limit')) {
+            return `GitHub API rate limit exceeded while ${context}. The limit resets in ${getRateLimitResetTime(error.rateLimit)}. Consider using authentication to increase your rate limit.`;
+        }
+        return `Access forbidden while ${context}. The repository may be private or require authentication.`;
+    }
+
+    if (error?.status === 404) {
+        return `Repository not found while ${context}. Please verify the repository exists and is accessible.`;
+    }
+
+    if (error?.status === 422) {
+        return `Invalid request parameters while ${context}. Please check the repository name and time range.`;
+    }
+
+    if (error?.status >= 500) {
+        return `GitHub API is temporarily unavailable while ${context}. Please try again in a few minutes.`;
+    }
+
+    if (error instanceof TypeError && error.message.includes('fetch')) {
+        return `Network error while ${context}. Please check your internet connection and try again.`;
+    }
+
+    return `An unexpected error occurred while ${context}. Please try again.`;
+}
+
+/**
+ * Retry mechanism with exponential backoff for failed API requests
+ */
+export async function retryWithBackoff<T>(
+    operation: () => Promise<GitHubApiResponse<T>>,
+    maxRetries: number = 3,
+    baseDelay: number = 1000,
+    signal?: AbortSignal
+): Promise<GitHubApiResponse<T>> {
+    let lastError: GitHubApiResponse<T> | null = null;
+
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        if (signal?.aborted) {
+            return { error: 'Request was cancelled' };
+        }
+
+        try {
+            const result = await operation();
+            
+            // If successful or it's a client error (4xx), don't retry
+            if (!result.error || (result.error && !result.error.includes('temporarily unavailable'))) {
+                return result;
+            }
+
+            lastError = result;
+
+            // Don't wait after the last attempt
+            if (attempt < maxRetries) {
+                const delay = baseDelay * Math.pow(2, attempt);
+                await new Promise(resolve => setTimeout(resolve, delay));
+            }
+
+        } catch (error) {
+            lastError = { error: 'Network error occurred during retry attempt' };
+            
+            if (attempt < maxRetries) {
+                const delay = baseDelay * Math.pow(2, attempt);
+                await new Promise(resolve => setTimeout(resolve, delay));
+            }
+        }
+    }
+
+    return lastError || { error: 'Maximum retry attempts exceeded' };
 }
 
 /**
